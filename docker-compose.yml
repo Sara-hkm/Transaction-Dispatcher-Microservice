@@ -1,0 +1,175 @@
+networks:
+  dispatch_net:
+    driver: bridge
+
+services:
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # PostgreSQL 16
+  # ──────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: transaction_dispatch_postgres
+    restart: unless-stopped
+    networks:
+      - dispatch_net
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: P@ssw0rd
+      POSTGRES_DB: TransactionDispatchDB
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d TransactionDispatchDB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # pgAdmin — visual PostgreSQL browser (http://localhost:5050)
+  #   Login: admin@dispatch.local / admin
+  # ──────────────────────────────────────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: transaction_dispatch_pgadmin
+    restart: unless-stopped
+    networks:
+      - dispatch_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@dispatch.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Kafka (KRaft mode — no ZooKeeper required)
+  # Two listeners:
+  #   INTERNAL  kafka:9092  — used by API container inside Docker network
+  #   EXTERNAL  localhost:9093 — used by host tools (Postman, kafka-ui on host)
+  # ──────────────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: transaction_dispatch_kafka
+    restart: unless-stopped
+    networks:
+      - dispatch_net
+    ports:
+      - "9093:9093"   # external access from host (e.g. Kafka UI, CLI tools)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9094
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"   # app creates topics explicitly on startup
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "Mk3OEYBSD8kTlFHhwEOqPg"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 20s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Kafka UI — visual topic/message browser (http://localhost:8090)
+  # ──────────────────────────────────────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: transaction_dispatch_kafka_ui
+    restart: unless-stopped
+    networks:
+      - dispatch_net
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Transaction Dispatch API (http://localhost:8080)
+  #   Swagger UI: http://localhost:8080/swagger
+  #   Health:     http://localhost:8080/health
+  # ──────────────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: TransactionDispatch.Api/Dockerfile
+    container_name: transaction_dispatch_api
+    restart: unless-stopped
+    networks:
+      - dispatch_net
+    ports:
+      - "8080:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      # Persistence
+      Persistence__Provider: PostgreSQL
+      Persistence__ConnectionString: "Host=postgres;Port=5432;Database=TransactionDispatchDB;Username=postgres;Password=P@ssw0rd;"
+      # Kafka — use INTERNAL listener (inside dispatch_net)
+      Kafka__BootstrapServers: "kafka:9092"
+      Kafka__Topic: "transactions-topic"
+      Kafka__ClientId: "transaction-dispatch-service"
+      Kafka__CompressionType: "snappy"
+      Kafka__LingerMs: "20"
+      Kafka__BatchSizeBytes: "131072"
+      Kafka__QueueBufferingMaxKbytes: "1048576"
+      Kafka__QueueBufferingMaxMessages: "1000000"
+      Kafka__MessageTimeoutMs: "120000"
+      Kafka__EnableIdempotence: "true"
+      Kafka__InFlightRequestsPerConnection: "5"
+      Kafka__NumPartitions: "6"
+      Kafka__ReplicationFactor: "1"          # single broker — must be 1
+      # Dispatch tuning
+      Dispatch__MaxParallelism: "16"
+      Dispatch__RetryCount: "3"
+      Dispatch__RetryDelayMilliseconds: "100"
+      Dispatch__ProgressSaveEvery: "50"
+      Dispatch__PollIntervalSeconds: "3"
+      Dispatch__MaxPollBatchSize: "20"
+      Dispatch__SupportedExtensions__0: ".xml"
+      # Idempotency
+      Idempotency__EnableFileIdempotency: "true"
+      Idempotency__EnableFolderIdempotency: "true"
+      Idempotency__FolderIdempotencyWindowMinutes: "5"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    volumes:
+      # Drop XML files into ./sample-transactions on your host to dispatch them.
+      - ./sample-transactions:/transactions
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  postgres_data:
+  kafka_data:
+  pgadmin_data:

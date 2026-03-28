@@ -1,0 +1,82 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# .NET / MSBuild
+# ──────────────────────────────────────────────────────────────────────────────
+**/bin/
+**/obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# NuGet
+*.nupkg
+*.snupkg
+**/[Pp]ackages/
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+
+# Publish output
+**/publish/
+**/PublishProfiles/
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Test results & coverage
+# ──────────────────────────────────────────────────────────────────────────────
+**/TestResults/
+**/coverage/
+*.trx
+*.coverage
+*.coveragexml
+lcov.info
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IDE — Visual Studio / VS Code / Rider
+# ──────────────────────────────────────────────────────────────────────────────
+.vs/
+.vscode/
+.idea/
+*.rsuser
+*.DotSettings.user
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Logs & temp files
+# ──────────────────────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Environment / secrets — never commit these
+# ──────────────────────────────────────────────────────────────────────────────
+.env
+.env.*
+**/secrets.json
+**/appsettings.Local.json
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Docker
+# ──────────────────────────────────────────────────────────────────────────────
+# Keep docker-compose.yml and Dockerfile — exclude only local overrides
+docker-compose.override.yml
+docker-compose.local.yml
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sample data (large binary / generated files)
+# ──────────────────────────────────────────────────────────────────────────────
+sample-transactions/transactions/
+# Keep the folder itself and its README
+!sample-transactions/.gitkeep
+!sample-transactions/README.md
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OS generated
+# ──────────────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*

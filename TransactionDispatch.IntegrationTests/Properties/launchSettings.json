@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "TransactionDispatch.IntegrationTests": {
+      "commandName": "Project"
+    },
+    "Container (Dockerfile)": {
+      "commandName": "Docker"
+    }
+  }
+}

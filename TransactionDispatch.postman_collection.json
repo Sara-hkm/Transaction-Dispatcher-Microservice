@@ -1,0 +1,580 @@
+{
+    "info": {
+        "_postman_id": "f43a8b2c-1d5e-4f6a-9b7c-3e2d1a0f8c9b",
+        "name": "TransactionDispatch API — Full Test Suite",
+        "description": "Covers every API branch plus a throughput verification targeting ≥ 600 messages/second.\n\n---\n\n## Collection variables (edit before running)\n\n| Variable | Description | Example |\n|---|---|---|\n| `baseUrl` | Service base URL | `http://localhost:5213` |\n| `dispatchFolderPath` | Folder with 10–50 XML files for functional tests | `C:/TestData/dispatch` |\n| `throughputFolderPath` | Folder with **6 000+ XML files** for the throughput test | `C:/TestData/throughput` |\n\n---\n\n## Test data setup (PowerShell)\n\n### Functional-test folder (10 files)\n```powershell\nNew-Item 'C:\\TestData\\dispatch' -ItemType Directory -Force\n1..10 | ForEach-Object {\n    \"<transaction><id>$_</id></transaction>\" |\n    Out-File \"C:\\TestData\\dispatch\\tx$_.xml\" -Encoding UTF8\n}\n```\n\n### Throughput folder (6 000 × ~1 KB files)\n```powershell\nNew-Item 'C:\\TestData\\throughput' -ItemType Directory -Force\n1..6000 | ForEach-Object {\n    \"<transaction><id>$_</id><payload>$('x' * 900)</payload></transaction>\" |\n    Out-File \"C:\\TestData\\throughput\\tx$_.xml\" -Encoding UTF8\n}\n```\n\n---\n\n## Running\n\n### Functional tests (all folders except 4)\nUse **Collection Runner** (Run Collection). All requests execute in order; polling loops rely on `pm.execution.setNextRequest` which is **only available in the Collection Runner**, not the single-request Send button.\n\n### Throughput test (folder 4)\nRequires Postman **v10.9+** for top-level `await` in scripts.\nFor concurrent load testing use **Collection Runner → Performance tab**:\n- Virtual Users: 60\n- Duration: 60 s\nThis drives 60 concurrent clients, each submitting a batch per second ≈ 60 × avg-files-per-batch msg/s.\n\n### Re-running\nFolder idempotency blocks resubmitting the same path within 60 minutes.\nBetween runs either change `dispatchFolderPath` / `throughputFolderPath` to a new path or wait 60 minutes.",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "variable": [
+        { "key": "baseUrl",              "value": "http://localhost:5213", "type": "string" },
+        { "key": "dispatchFolderPath",   "value": "C:/TestData/dispatch",  "type": "string" },
+        { "key": "throughputFolderPath", "value": "C:/TestData/throughput","type": "string" },
+        { "key": "jobId",                "value": "",  "type": "string" },
+        { "key": "throughputJobId",      "value": "",  "type": "string" },
+        { "key": "pollAttempts",         "value": "0", "type": "string" },
+        { "key": "throughputPollAttempts","value": "0","type": "string" },
+        { "key": "throughputStartMs",    "value": "0", "type": "string" }
+    ],
+    "item": [
+
+        {
+            "name": "1 — Health Check",
+            "item": [
+                {
+                    "name": "GET /health — all checks Healthy",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/health",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["health"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "pm.test('Status 200 OK', () => pm.response.to.have.status(200));",
+                                    "",
+                                    "const body = pm.response.json();",
+                                    "",
+                                    "pm.test('Overall status is Healthy', () => {",
+                                    "    pm.expect(body.status).to.eql('Healthy');",
+                                    "});",
+                                    "",
+                                    "pm.test('Response has checks array', () => {",
+                                    "    pm.expect(body.checks).to.be.an('array').and.not.empty;",
+                                    "});",
+                                    "",
+                                    "pm.test('database check is Healthy', () => {",
+                                    "    const db = body.checks.find(c => c.name === 'database');",
+                                    "    pm.expect(db, '\"database\" entry must exist in checks').to.exist;",
+                                    "    pm.expect(db.status).to.eql('Healthy');",
+                                    "});",
+                                    "",
+                                    "pm.test('kafka check is Healthy', () => {",
+                                    "    const kafka = body.checks.find(c => c.name === 'kafka');",
+                                    "    pm.expect(kafka, '\"kafka\" entry must exist in checks').to.exist;",
+                                    "    pm.expect(kafka.status).to.eql('Healthy');",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+
+        {
+            "name": "2 — Happy Path (dispatch → poll → completed)",
+            "item": [
+                {
+                    "name": "POST /dispatch-transactions — valid folder → 202 Accepted",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            { "key": "Content-Type", "value": "application/json" }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"folderPath\": \"{{dispatchFolderPath}}\",\n    \"deleteAfterSend\": false\n}",
+                            "options": { "raw": { "language": "json" } }
+                        },
+                        "url": {
+                            "raw": "{{baseUrl}}/dispatch-transactions",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["dispatch-transactions"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "prerequest",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "pm.collectionVariables.set('pollAttempts', '0');"
+                                ]
+                            }
+                        },
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "pm.test('Status 202 Accepted', () => pm.response.to.have.status(202));",
+                                    "",
+                                    "const body = pm.response.json();",
+                                    "",
+                                    "pm.test('Response contains a jobId GUID', () => {",
+                                    "    pm.expect(body.jobId).to.be.a('string').and.match(",
+                                    "        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i",
+                                    "    );",
+                                    "});",
+                                    "",
+                                    "pm.collectionVariables.set('jobId', body.jobId);"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "GET /dispatch-status/{{jobId}} — poll until terminal",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/dispatch-status/{{jobId}}",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["dispatch-status", "{{jobId}}"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "prerequest",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "// 500 ms back-off between polls (requires Postman v10.9+ for top-level await).",
+                                    "const delay = ms => new Promise(resolve => setTimeout(resolve, ms));",
+                                    "await delay(500);"
+                                ]
+                            }
+                        },
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "const TERMINAL = ['Completed', 'Failed', 'Cancelled'];",
+                                    "const body = pm.response.json();",
+                                    "",
+                                    "pm.test('Status code is 200 (terminal) or 102 (in-progress)', () => {",
+                                    "    pm.expect(pm.response.code).to.be.oneOf([200, 102]);",
+                                    "});",
+                                    "",
+                                    "pm.test('Body contains expected fields', () => {",
+                                    "    pm.expect(body).to.include.all.keys('progress','state','totalFiles','processed','successful','failed','error');",
+                                    "});",
+                                    "",
+                                    "if (!TERMINAL.includes(body.state)) {",
+                                    "    const attempts = parseInt(pm.collectionVariables.get('pollAttempts') || '0');",
+                                    "    pm.expect(attempts, 'Job did not reach terminal state within 60 polls (30 s)').to.be.below(60);",
+                                    "    pm.collectionVariables.set('pollAttempts', String(attempts + 1));",
+                                    "    pm.execution.setNextRequest('GET /dispatch-status/{{jobId}} — poll until terminal');",
+                                    "} else {",
+                                    "    pm.collectionVariables.set('pollAttempts', '0');",
+                                    "",
+                                    "    pm.test('Terminal state is Completed (not Failed/Cancelled)', () => {",
+                                    "        pm.expect(body.state).to.eql('Completed');",
+                                    "    });",
+                                    "",
+                                    "    pm.test('Status code is 200 for a terminal job', () => {",
+                                    "        pm.response.to.have.status(200);",
+                                    "    });",
+                                    "",
+                                    "    pm.test('processed equals totalFiles', () => {",
+                                    "        pm.expect(body.processed).to.eql(body.totalFiles);",
+                                    "    });",
+                                    "",
+                                    "    pm.test('progress is 100%', () => {",
+                                    "        pm.expect(body.progress).to.eql('100%');",
+                                    "    });",
+                                    "",
+                                    "    pm.test('No errors recorded', () => {",
+                                    "        pm.expect(body.failed).to.eql(0);",
+                                    "        pm.expect(body.error).to.be.null;",
+                                    "    });",
+                                    "}"
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+
+        {
+            "name": "3 — Error Scenarios",
+            "item": [
+                {
+                    "name": "POST /dispatch-transactions — empty folderPath → 400",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            { "key": "Content-Type", "value": "application/json" }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"folderPath\": \"\",\n    \"deleteAfterSend\": false\n}",
+                            "options": { "raw": { "language": "json" } }
+                        },
+                        "url": {
+                            "raw": "{{baseUrl}}/dispatch-transactions",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["dispatch-transactions"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "pm.test('Status 400 Bad Request for empty folderPath', () => {",
+                                    "    pm.response.to.have.status(400);",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "POST /dispatch-transactions — whitespace folderPath → 400",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            { "key": "Content-Type", "value": "application/json" }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"folderPath\": \"   \",\n    \"deleteAfterSend\": false\n}",
+                            "options": { "raw": { "language": "json" } }
+                        },
+                        "url": {
+                            "raw": "{{baseUrl}}/dispatch-transactions",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["dispatch-transactions"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "pm.test('Status 400 Bad Request for whitespace-only folderPath', () => {",
+                                    "    pm.response.to.have.status(400);",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "POST /dispatch-transactions — duplicate folder → 409 Conflict",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            { "key": "Content-Type", "value": "application/json" }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"folderPath\": \"{{dispatchFolderPath}}\",\n    \"deleteAfterSend\": false\n}",
+                            "options": { "raw": { "language": "json" } }
+                        },
+                        "url": {
+                            "raw": "{{baseUrl}}/dispatch-transactions",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["dispatch-transactions"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "// The happy-path job for dispatchFolderPath completed in folder 2.",
+                                    "// Within the 60-minute idempotency window a second submission must be rejected.",
+                                    "pm.test('Status 409 Conflict for duplicate folder path', () => {",
+                                    "    pm.response.to.have.status(409);",
+                                    "});",
+                                    "",
+                                    "const body = pm.response.json();",
+                                    "pm.test('Conflict body contains an error message', () => {",
+                                    "    pm.expect(body.error).to.be.a('string').and.not.empty;",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "GET /dispatch-status/{unknownGuid} — unknown job → 404",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/dispatch-status/00000000-0000-0000-0000-000000000000",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["dispatch-status", "00000000-0000-0000-0000-000000000000"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "pm.test('Status 404 Not Found for unknown jobId', () => {",
+                                    "    pm.response.to.have.status(404);",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "GET /dispatch-status/not-a-guid — invalid GUID format → 404",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/dispatch-status/not-a-guid",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["dispatch-status", "not-a-guid"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "// The route constraint {jobId:guid} rejects non-GUID segments → 404.",
+                                    "pm.test('Status 404 for non-GUID route segment', () => {",
+                                    "    pm.response.to.have.status(404);",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "GET /dispatch-status/{{jobId}} — completed job → 200 with full body",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/dispatch-status/{{jobId}}",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["dispatch-status", "{{jobId}}"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "pm.test('Status 200 OK for terminal job', () => pm.response.to.have.status(200));",
+                                    "",
+                                    "const body = pm.response.json();",
+                                    "",
+                                    "pm.test('State is Completed', () => {",
+                                    "    pm.expect(body.state).to.eql('Completed');",
+                                    "});",
+                                    "",
+                                    "pm.test('Body has all expected fields', () => {",
+                                    "    pm.expect(body).to.include.all.keys(",
+                                    "        'progress', 'state', 'totalFiles', 'processed', 'successful', 'failed', 'error'",
+                                    "    );",
+                                    "});",
+                                    "",
+                                    "pm.test('failed count is 0', () => pm.expect(body.failed).to.eql(0));",
+                                    "pm.test('successful equals totalFiles', () => pm.expect(body.successful).to.eql(body.totalFiles));",
+                                    "pm.test('progress is 100%', () => pm.expect(body.progress).to.eql('100%'));"
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+
+        {
+            "name": "4 — Throughput ≥ 600 msg/s",
+            "description": "Dispatches 6 000 XML files and asserts the service processes them at ≥ 600 files/second.\n\nPre-requisite — create the test data:\n```powershell\nNew-Item 'C:\\TestData\\throughput' -ItemType Directory -Force\n1..6000 | ForEach-Object {\n    \"<transaction><id>$_</id><payload>$('x' * 900)</payload></transaction>\" |\n    Out-File \"C:\\TestData\\throughput\\tx$_.xml\" -Encoding UTF8\n}\n```\n\nNote: After a successful run, the folder is blocked by idempotency for 60 minutes.\nChange `throughputFolderPath` to a new path and recreate the files to re-test sooner.",
+            "item": [
+                {
+                    "name": "POST /dispatch-transactions — dispatch 6 000-file batch",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            { "key": "Content-Type", "value": "application/json" }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"folderPath\": \"{{throughputFolderPath}}\",\n    \"deleteAfterSend\": false\n}",
+                            "options": { "raw": { "language": "json" } }
+                        },
+                        "url": {
+                            "raw": "{{baseUrl}}/dispatch-transactions",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["dispatch-transactions"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "prerequest",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "pm.collectionVariables.set('throughputPollAttempts', '0');",
+                                    "// Record wall-clock time BEFORE the request so elapsed time includes network latency.",
+                                    "pm.collectionVariables.set('throughputStartMs', String(Date.now()));"
+                                ]
+                            }
+                        },
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "pm.test('Status 202 Accepted', () => pm.response.to.have.status(202));",
+                                    "",
+                                    "const body = pm.response.json();",
+                                    "pm.test('Response contains throughputJobId', () => {",
+                                    "    pm.expect(body.jobId).to.be.a('string').and.match(",
+                                    "        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i",
+                                    "    );",
+                                    "});",
+                                    "pm.collectionVariables.set('throughputJobId', body.jobId);"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "GET /dispatch-status/{{throughputJobId}} — immediate poll (expect 102 In-Progress)",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/dispatch-status/{{throughputJobId}}",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["dispatch-status", "{{throughputJobId}}"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "// Polled immediately after submission — 6 000 files should still be in-flight,",
+                                    "// so we expect 102 Processing. Accept 200 only on exceptionally fast machines.",
+                                    "pm.test('Status is 102 Processing or 200 Completed', () => {",
+                                    "    pm.expect(pm.response.code).to.be.oneOf([102, 200]);",
+                                    "});",
+                                    "",
+                                    "const body = pm.response.json();",
+                                    "pm.test('State is Queued, Running, or Completed', () => {",
+                                    "    pm.expect(body.state).to.be.oneOf(['Queued', 'Running', 'Completed']);",
+                                    "});",
+                                    "",
+                                    "pm.test('Body has all expected fields', () => {",
+                                    "    pm.expect(body).to.include.all.keys(",
+                                    "        'progress','state','totalFiles','processed','successful','failed','error'",
+                                    "    );",
+                                    "});"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "GET /dispatch-status/{{throughputJobId}} — poll to completion + assert ≥ 600 msg/s",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/dispatch-status/{{throughputJobId}}",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["dispatch-status", "{{throughputJobId}}"]
+                        }
+                    },
+                    "event": [
+                        {
+                            "listen": "prerequest",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "// 1-second delay between polls; avoids hammering the API while still",
+                                    "// adding minimal overhead to the elapsed-time measurement.",
+                                    "const delay = ms => new Promise(resolve => setTimeout(resolve, ms));",
+                                    "await delay(1000);"
+                                ]
+                            }
+                        },
+                        {
+                            "listen": "test",
+                            "script": {
+                                "type": "text/javascript",
+                                "exec": [
+                                    "const TERMINAL = ['Completed', 'Failed', 'Cancelled'];",
+                                    "const body = pm.response.json();",
+                                    "",
+                                    "if (!TERMINAL.includes(body.state)) {",
+                                    "    // Still running — loop back.",
+                                    "    const attempts = parseInt(pm.collectionVariables.get('throughputPollAttempts') || '0');",
+                                    "    // 300 attempts × 1 s = 5-minute max wait.",
+                                    "    pm.expect(attempts, 'Throughput job did not complete within 300 s').to.be.below(300);",
+                                    "    pm.collectionVariables.set('throughputPollAttempts', String(attempts + 1));",
+                                    "    pm.execution.setNextRequest('GET /dispatch-status/{{throughputJobId}} — poll to completion + assert ≥ 600 msg/s');",
+                                    "    return;",
+                                    "}",
+                                    "",
+                                    "// ── Terminal state reached ──────────────────────────────────────",
+                                    "pm.collectionVariables.set('throughputPollAttempts', '0');",
+                                    "",
+                                    "pm.test('Throughput job completed without error', () => {",
+                                    "    pm.expect(body.state).to.eql('Completed');",
+                                    "});",
+                                    "",
+                                    "pm.test('No files failed', () => {",
+                                    "    pm.expect(body.failed).to.eql(0);",
+                                    "});",
+                                    "",
+                                    "pm.test('successful equals totalFiles', () => {",
+                                    "    pm.expect(body.successful).to.eql(body.totalFiles);",
+                                    "});",
+                                    "",
+                                    "// ── Throughput calculation ──────────────────────────────────────",
+                                    "// Elapsed time is measured from BEFORE the dispatch request was sent",
+                                    "// (set in the pre-request script of the Dispatch step) to NOW,",
+                                    "// so it includes real end-to-end wall-clock time including the poll delays.",
+                                    "const startMs      = parseInt(pm.collectionVariables.get('throughputStartMs'));",
+                                    "const elapsedSec   = (Date.now() - startMs) / 1000;",
+                                    "const totalFiles   = body.totalFiles;",
+                                    "const msgPerSecond = totalFiles / elapsedSec;",
+                                    "",
+                                    "console.log(",
+                                    "    `Throughput: ${totalFiles} files / ${elapsedSec.toFixed(1)} s` +",
+                                    "    ` = ${msgPerSecond.toFixed(0)} msg/s`",
+                                    ");",
+                                    "",
+                                    "pm.test(",
+                                    "    `Throughput ≥ 600 msg/s ` +",
+                                    "    `(actual: ${msgPerSecond.toFixed(0)} msg/s — ` +",
+                                    "    `${totalFiles} files in ${elapsedSec.toFixed(1)} s)`,",
+                                    "    () => {",
+                                    "        pm.expect(msgPerSecond).to.be.at.least(",
+                                    "            600,",
+                                    "            `Expected ≥ 600 msg/s but measured ${msgPerSecond.toFixed(0)} msg/s`",
+                                    "        );",
+                                    "    }",
+                                    ");"
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+
+    ]
+}
